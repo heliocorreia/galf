@@ -3,6 +3,7 @@ package galf
 import (
 	"encoding/base64"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/afex/hystrix-go/hystrix"
@@ -21,6 +22,8 @@ type (
 	}
 
 	OAuthTokenManager struct {
+		sync.Mutex
+
 		TokenEndPoint string
 		ClientId      string
 		ClientSecret  string
@@ -60,11 +63,11 @@ func (tm *OAuthTokenManager) GetToken() (Token, error) {
 
 	if tm.token == nil || !tm.token.isValid() {
 		for i := 1; i <= tm.Options.MaxRetries; i++ {
-			token, err := tm.do()
-
-			if err == nil && !token.isValid() {
-				err = TokenExpiredError
-			}
+			tm.Lock()
+			// fmt.Printf("ANTES tm.token == nil:%v\n", tm.token == nil)
+			err := tm.do()
+			// fmt.Printf("DEPOIS tm.token == nil:%v\n", tm.token == nil)
+			tm.Unlock()
 
 			if err != nil {
 				if i < tm.Options.MaxRetries {
@@ -74,7 +77,6 @@ func (tm *OAuthTokenManager) GetToken() (Token, error) {
 				return Token{}, err
 			}
 
-			tm.token = token
 			return *tm.token, nil
 		}
 	}
@@ -82,27 +84,34 @@ func (tm *OAuthTokenManager) GetToken() (Token, error) {
 	return *tm.token, nil
 }
 
-func (tm *OAuthTokenManager) do() (token *Token, err error) {
+func (tm *OAuthTokenManager) do() (err error) {
 	var resp *goreq.Response
 	if tm.Options.HystrixConfig == nil {
 		if resp, err = tm.request(); err != nil {
-			return nil, err
+			return err
 		}
 	} else {
 		if err = tm.Options.HystrixConfig.valid(); err != nil {
-			return nil, err
+			return err
 		}
 		if resp, err = tm.requestHystrix(); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	defer resp.Body.Close()
-	if token, err = newToken(resp.Body); err != nil {
-		return nil, err
+	if resp != nil {
+		defer resp.Body.Close()
 	}
 
-	return token, nil
+	if tm.token, err = newToken(resp.Body); err != nil {
+		return err
+	}
+
+	if !tm.token.isValid() {
+		return TokenExpiredError
+	}
+
+	return nil
 }
 
 func (tm *OAuthTokenManager) requestHystrix() (*goreq.Response, error) {
